@@ -1,0 +1,9 @@
+{
+  "requestFramePermissions": [
+    "camera",
+    "geolocation",
+    "storage"
+  ],
+  "name": "C-Note",
+  "description": "운전자를 위한 스마트 운송 기록 및 관리 솔루션"
+}

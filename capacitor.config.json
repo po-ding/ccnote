@@ -1,0 +1,6 @@
+{
+  "appId": "com.cnote.app",
+  "appName": "C-Note",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}
