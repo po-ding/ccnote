@@ -188,22 +188,52 @@ const SMSParser: React.FC<Props> = ({ locations, setLocations, onParsed, records
       if (line.includes('[Web발신]') || line.includes('배차표') || line.includes('<--인식금지') || line.trim().length < 2) return;
       
       let orderNumber: string | undefined;
-      const match = line.match(/\b\d{7}\b/);
-      if (match) orderNumber = match[0];
+      const orderMatch = line.match(/\b\d{7,}\b/);
+      if (orderMatch) orderNumber = orderMatch[0];
+
+      // 호차 추출 (예: [3호], 3호, 3호차)
+      let vehicleNo: string | undefined;
+      const vehMatch = line.match(/\[(\d+호)\]|(\d+호차)|(\d+호)/);
+      if (vehMatch) {
+        vehicleNo = vehMatch[1] || vehMatch[2] || vehMatch[3];
+      }
+
+      // 배차시간 추출 (예: 03:00, 3:00, 08:20)
+      let scheduledTime: string | undefined;
+      const timeMatch = line.match(/(\b[0-2]?\d:[0-5]\d\b)/);
+      if (timeMatch) {
+        scheduledTime = timeMatch[1].padStart(5, '0');
+      }
+
+      // 층수/도크 추출 (예: 6층, 5F, 3F, DOCK 5, 2도크)
+      let floorInfo: string | undefined;
+      const floorMatch = line.match(/(\d+층|\d+[fF]|\b[dD][oO][cC][kK]\s*\d+|\d+도크)/);
+      if (floorMatch) {
+        floorInfo = floorMatch[1];
+      }
+
+      // 특이사항 추출
+      let aiParsedNote: string | undefined;
+      const noteMatch = line.match(/(?:특이사항|메모|주의|비고)[\s:：]+([^\n,]+)/i);
+      if (noteMatch) {
+        aiParsedNote = noteMatch[1].trim();
+      }
 
       // 특수문자나 공백으로 분리
       const parts = line.split(/\s*(?:->|~|➜|\s+)\s*/).filter(p => p.trim().length > 0);
       
       if (parts.length >= 2) {
-        // 시간, 톤수, 날짜, 오더번호 등 제외하고 장소만 추출
+        // 시간, 톤수, 날짜, 오더번호, 층수 등 제외하고 장소만 추출
         const cleanParts = parts.filter(p => 
           !p.startsWith('[') && 
-          !p.match(/^\d+호$/) && 
+          !p.match(/^\d+호(?:차)?$/) && 
           !p.match(/^\d+[tT톤]$/) && 
           !p.includes('월') && 
           !p.includes('일') && 
           !p.match(/^\d{1,2}:\d{2}$/) &&
-          !p.match(/^\d{5,}$/)
+          !p.match(/^\d{5,}$/) &&
+          !p.match(/^\d+층$/) &&
+          !p.match(/^\d+[fF]$/)
         );
 
         // 2개씩 짝지어 처리 (한 줄에 여러 건이 붙어있는 경우 대응)
@@ -214,7 +244,11 @@ const SMSParser: React.FC<Props> = ({ locations, setLocations, onParsed, records
               from: getFuzzyLocation(cleanParts[i]),
               to: getFuzzyLocation(cleanParts[i+1]),
               time: '00:00',
-              orderNumber
+              orderNumber,
+              vehicleNo,
+              scheduledTime,
+              floorInfo,
+              aiParsedNote
             });
           }
         }

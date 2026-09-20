@@ -164,6 +164,11 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
     onQuickUpdate(id, status);
   };
 
+  const getVisitCount = (centerName?: string) => {
+    if (!centerName || !Array.isArray(records)) return 0;
+    return records.filter(r => r && (r.from === centerName || r.to === centerName)).length;
+  };
+
   const renderCard = (record: TransportRecord, isActive: boolean = false, isWaiting: boolean = false) => {
     if (!record) return null;
     const isActuallyCompleted = !isActive && !isWaiting && (
@@ -205,6 +210,9 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
       durationStr = `${h > 0 ? h + ':' : ''}${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
 
+    const startVisitCount = getVisitCount(record.from);
+    const endVisitCount = getVisitCount(record.to);
+
     return (
       <div key={record.id} className={`bg-white rounded-2xl p-4 shadow-sm border ${isActive ? 'border-blue-500 ring-2 ring-blue-100 scale-[1.02]' : isCancelled ? 'border-red-200 bg-red-50/10' : isOverhead ? 'border-orange-200 bg-orange-50/10' : 'border-slate-100'} flex flex-col gap-3 transition-all relative overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-300`}>
         {isActive && (
@@ -212,21 +220,21 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
             <div className="h-full bg-blue-500 animate-[loading_2s_infinite] w-1/3"></div>
           </div>
         )}
-        <div className="flex justify-between items-start">
-          <div className="flex items-center gap-3">
+        <div className="flex justify-between items-center">
+          <div className="flex items-center gap-2.5 flex-1 min-w-0">
             {isWaiting ? (
               <button 
                 onClick={() => onQuickUpdate(record.id, '화물운송')} 
-                className="w-10 h-10 bg-blue-600 hover:bg-blue-700 active:scale-90 text-white rounded-xl shadow-md transition-all flex items-center justify-center shrink-0 group"
+                className="p-2 bg-blue-600 hover:bg-blue-700 active:scale-90 text-white rounded-xl shadow-md transition-all flex items-center justify-center shrink-0 group"
                 title="운행 시작"
                 aria-label="운행 시작"
               >
-                <Play size={20} fill="white" className="ml-0.5 group-hover:scale-110 transition-transform" />
+                <Play size={18} fill="white" className="ml-0.5 group-hover:scale-110 transition-transform" />
               </button>
             ) : (
-              <span className={`p-2.5 rounded-xl ${
+              <span className={`p-2 rounded-xl shrink-0 ${
                 isActive 
-                  ? 'bg-blue-600 text-white' 
+                  ? 'bg-blue-600 text-white animate-pulse' 
                   : isCancelled
                     ? 'bg-red-50 text-red-500 border border-red-200'
                     : record.type === '공차거리' 
@@ -239,70 +247,28 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
                             ? 'bg-emerald-50 text-emerald-600' 
                             : 'bg-slate-100 text-slate-500'
               }`}>
-                {isActive ? <Activity size={20} className="animate-pulse" /> : isCancelled ? <Ban size={20} /> : record.type === '공차거리' ? <Wind size={20} /> : record.type === '주유기록' ? <Fuel size={20} /> : record.type === '운행회차' ? <CornerUpLeft size={20} /> : <Truck size={20} />}
+                {isActive ? <Activity size={18} /> : isCancelled ? <Ban size={18} /> : record.type === '공차거리' ? <Wind size={18} /> : record.type === '주유기록' ? <Fuel size={18} /> : record.type === '운행회차' ? <CornerUpLeft size={18} /> : <Truck size={18} />}
               </span>
             )}
-            <div>
-              <div className="flex items-center gap-1.5 flex-wrap">
-                {/* 1. 진행시간 */}
-                <span className="text-[11px] font-bold text-slate-600 bg-slate-100 border border-slate-200/80 px-2 py-0.5 rounded-md flex items-center gap-1 shrink-0">
-                  <Clock size={11} className="text-slate-400" />
-                  <span>{isActive && durationStr ? durationStr : (record.isStarted || record.endTime ? record.time : '00:00')}</span>
+
+            <div className="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
+              {/* 1. 진행시간 */}
+              <span className="text-[11px] font-bold text-slate-600 bg-slate-100 border border-slate-200/80 px-2 py-0.5 rounded-md flex items-center gap-1 shrink-0">
+                <Clock size={11} className="text-slate-400" />
+                <span>{isActive && durationStr ? durationStr : (record.isStarted || record.endTime ? record.time : '00:00')}</span>
+              </span>
+
+              {/* 2. 배정시간 */}
+              {record.scheduledTime && (
+                <span className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200/80 px-2 py-0.5 rounded-md shrink-0">
+                  배정 {record.scheduledTime}
                 </span>
-
-                {/* 2. 배정시간 */}
-                {record.scheduledTime && (
-                  <span className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200/80 px-2 py-0.5 rounded-md shrink-0">
-                    배정 {record.scheduledTime}
-                  </span>
-                )}
-
-                {/* 3. 상차층수 / 동 / 도크 */}
-                {record.floorInfo && (
-                  <span className="text-[11px] font-bold text-slate-700 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-md shrink-0">
-                    {record.floorInfo}
-                  </span>
-                )}
-
-                {/* 4. 상차호 / 몇호차 */}
-                {record.vehicleNo && (
-                  <span className="text-[11px] font-black text-blue-700 bg-blue-50 border border-blue-200 px-2 py-0.5 rounded-md shrink-0">
-                    [{record.vehicleNo.replace(/[\[\]]/g, '')}]
-                  </span>
-                )}
-
-                {/* 5. 밀크런/주문 번호 */}
-                {record.orderNumber && (
-                  <span className="text-[10px] font-bold text-slate-500 bg-slate-50 border border-slate-200 px-1.5 py-0.5 rounded-md shrink-0">
-                    #{record.orderNumber}
-                  </span>
-                )}
-              </div>
-
-              {/* 6. 특이사항 (AI 분석 특이사항만 표기) */}
-              {record.aiParsedNote && (
-                <div className="text-[11px] text-slate-600 mt-1 font-medium truncate">
-                  💡 <span className="font-bold text-slate-700">특이사항:</span> {record.aiParsedNote}
-                </div>
-              )}
-
-              {!isWaiting && (
-                <div className={`font-bold leading-tight mt-1 text-xs ${
-                  isCancelled 
-                    ? 'text-red-500 font-black' 
-                    : record.type === '운행회차' 
-                      ? 'text-orange-600 font-black' 
-                      : isOverhead 
-                        ? 'text-orange-600' 
-                        : 'text-slate-800'
-                }`}>
-                  {displayType}
-                </div>
               )}
             </div>
           </div>
-          <div className="flex gap-1">
-            <button onClick={() => onEdit(record)} className="p-2 text-slate-300 hover:text-blue-500 transition-colors" title="수정"><Edit2 size={16} /></button>
+
+          <div className="flex gap-1 shrink-0">
+            <button onClick={() => onEdit(record)} className="p-1.5 text-slate-300 hover:text-blue-500 transition-colors" title="수정"><Edit2 size={16} /></button>
           </div>
         </div>
         
@@ -331,14 +297,34 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
                     </button>
                   )}
                 </div>
-                <button 
-                  onClick={() => handleEditCenter(record, 'from')} 
-                  className="p-1.5 bg-white border border-slate-200 text-slate-500 hover:text-blue-600 hover:border-blue-300 rounded-lg flex items-center justify-center active:scale-95 transition-all shrink-0 shadow-2xs"
-                  title="상차 센터 수정"
-                >
-                  <Edit2 size={13} />
-                </button>
+                {startVisitCount > 0 && (
+                  <span className="text-xs font-bold text-slate-700 tracking-tight shrink-0">
+                    ({startVisitCount}회)
+                  </span>
+                )}
               </div>
+
+              {/* 상차지 층수 / 도크 / 특이사항 */}
+              {(record.floorInfo || record.vehicleNo || record.aiParsedNote) && (
+                <div className="ml-4 flex flex-wrap items-center gap-1.5 mt-1">
+                  {record.floorInfo && (
+                    <span className="text-[10px] font-bold text-slate-700 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded">
+                      {record.floorInfo}
+                    </span>
+                  )}
+                  {record.vehicleNo && (
+                    <span className="text-[10px] font-black text-blue-700 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded">
+                      [{record.vehicleNo.replace(/[\[\]]/g, '')}]
+                    </span>
+                  )}
+                  {record.aiParsedNote && (
+                    <div className="flex items-center gap-1 text-[11px] font-medium text-slate-700 bg-amber-50/80 px-1.5 py-0.5 rounded border border-amber-200/60 max-w-full">
+                      <span className="text-xs">💡</span>
+                      <span className="truncate">{record.aiParsedNote}</span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* 상차 메모란 */}
               <div className="ml-4 pl-2.5 border-l-2 border-blue-200 flex items-center justify-between gap-2 bg-blue-50/40 p-2 rounded-xl">
@@ -387,13 +373,11 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
                     </button>
                   )}
                 </div>
-                <button 
-                  onClick={() => handleEditCenter(record, 'to')} 
-                  className="p-1.5 bg-white border border-slate-200 text-slate-500 hover:text-emerald-600 hover:border-emerald-300 rounded-lg flex items-center justify-center active:scale-95 transition-all shrink-0 shadow-2xs"
-                  title="하차 센터 수정"
-                >
-                  <Edit2 size={13} />
-                </button>
+                {endVisitCount > 0 && (
+                  <span className="text-xs font-bold text-slate-700 tracking-tight shrink-0">
+                    ({endVisitCount}회)
+                  </span>
+                )}
               </div>
 
               {/* 하차 메모란 */}

@@ -7,15 +7,15 @@ import { GoogleGenAI, Type } from "@google/genai";
  * @param base64Data 이미지의 Base64 데이터 (데이터 URL 접두사 제외)
  */
 export const analyzeReceipt = async (mimeType: string, base64Data: string) => {
-  // 사용자가 제공한 기본 API 키
-  const defaultApiKey = "AIzaSyC93qXIy2YbzZqHJoKB0sIvsUeGkw1qHNY";
-  const savedApiKey = localStorage.getItem('GEMINI_API_KEY') || defaultApiKey;
+  const savedApiKey = localStorage.getItem('GEMINI_API_KEY')?.trim();
+  const fallbackApiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || "AIzaSyC93qXIy2YbzZqHJoKB0sIvsUeGkw1qHNY";
+  const effectiveApiKey = savedApiKey || fallbackApiKey;
   
-  if (!savedApiKey || savedApiKey.length < 10) {
-    throw new Error("AI 분석 키가 설정되지 않았습니다. 설정에서 API 키를 확인해주세요.");
+  if (!effectiveApiKey || effectiveApiKey.length < 10) {
+    throw new Error("AI 분석을 위해 '관리 > AI 서비스 설정'에서 Gemini API 키를 등록해 주세요.");
   }
 
-  const ai = new GoogleGenAI({ apiKey: savedApiKey });
+  const ai = new GoogleGenAI({ apiKey: effectiveApiKey });
   
   try {
     const response = await ai.models.generateContent({
@@ -65,8 +65,12 @@ export const analyzeReceipt = async (mimeType: string, base64Data: string) => {
     }
 
     return JSON.parse(response.text.trim());
-  } catch (error) {
+  } catch (error: any) {
     console.error("Gemini OCR Error:", error);
+    const errMsg = error?.message || '';
+    if (errMsg.includes('403') || errMsg.includes('PERMISSION_DENIED') || errMsg.includes('does not have permission')) {
+      throw new Error("Gemini API 키 권한이 없거나 만료되었습니다. '관리 > AI 서비스 설정'에서 유효한 API 키를 새로 입력해 주세요.");
+    }
     throw error;
   }
 };

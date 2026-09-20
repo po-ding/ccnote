@@ -39,6 +39,7 @@ import {
 } from './utils';
 
 import { analyzeReceipt } from './ocr';
+import { saveToFirebase } from './firebase';
 
 import RecordForm from './components/RecordForm';
 import RecordList from './components/RecordList';
@@ -609,6 +610,15 @@ const App: React.FC = () => {
     if (now - lastBackupTimeRef.current > 3600000) {
       handleManualBackup(true);
       lastBackupTimeRef.current = now;
+      
+      // Firebase 클라우드에도 무음 자동 백업
+      const cloudUserId = localStorage.getItem('cloud_user_id') || 'my_driver_data';
+      saveToFirebase(cloudUserId, records, fixedExpenses, salaryRecords, locations).then(ok => {
+        if (ok) {
+          const timeNow = new Date().toISOString();
+          localStorage.setItem('last_cloud_sync_time', timeNow);
+        }
+      }).catch(() => {});
     }
   }, [records, locations, fixedExpenses, salaryRecords, isLoaded]);
 

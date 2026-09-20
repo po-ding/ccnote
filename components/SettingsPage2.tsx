@@ -22,10 +22,15 @@ import {
   AlertCircle,
   Save,
   X,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Cloud,
+  CloudUpload,
+  CloudDownload,
+  RefreshCw
 } from 'lucide-react';
 import Papa from 'papaparse';
 import { getTodayString, formatToManwon } from '../utils';
+import { saveToFirebase, loadFromFirebase } from '../firebase';
 
 // --- 외부 컴포넌트 선언 (리렌더링 시 포커스 잃음 방지) ---
 
@@ -188,10 +193,35 @@ const SettingsPage2: React.FC<any> = ({
   };
 
   const saveGeneralEdit = () => {
-    if (!genCost || !editingGenId) return;
+    if (!genCost) return;
     const costVal = Math.round(parseFloat(genCost) * 10000);
-    setRecords((prev: TransportRecord[]) => prev.map(r => r.id === editingGenId ? { ...r, date: genDate, memo: genMemo, cost: costVal } : r));
-    setEditingGenId(null);
+    if (editingGenId) {
+      setRecords((prev: TransportRecord[]) => prev.map(r => r.id === editingGenId ? { ...r, date: genDate, memo: genMemo, cost: costVal } : r));
+      setEditingGenId(null);
+    } else {
+      const now = new Date();
+      setRecords((prev: TransportRecord[]) => [{
+        id: Date.now(),
+        date: genDate,
+        time: `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`,
+        type: '지출',
+        cost: costVal,
+        memo: genMemo,
+        distance: 0,
+        start_gps: '',
+        end_gps: '',
+        income: 0,
+        liters: 0,
+        unitPrice: 0,
+        brand: '',
+        ureaLiters: 0,
+        ureaUnitPrice: 0,
+        ureaStation: '',
+        supplyItem: '',
+        mileage: 0,
+        waitingTime: 0
+      } as TransportRecord, ...prev]);
+    }
     setGenCost(''); setGenMemo(''); setGenDate(getTodayString());
   };
 
@@ -351,6 +381,65 @@ const SettingsPage2: React.FC<any> = ({
     e.target.value = '';
   };
 
+  const [isCloudSyncing, setIsCloudSyncing] = useState(false);
+  const [cloudUserId, setCloudUserId] = useState(() => localStorage.getItem('cloud_user_id') || 'my_driver_data');
+  const [lastCloudSyncTime, setLastCloudSyncTime] = useState(() => localStorage.getItem('last_cloud_sync_time') || '');
+
+  const handleCloudUpload = async () => {
+    if (isCloudSyncing) return;
+    setIsCloudSyncing(true);
+    window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: 'Firebase 클라우드에 백업 중...' } }));
+    
+    try {
+      const ok = await saveToFirebase(cloudUserId, records, fixedExpenses, salaryRecords, locations);
+      if (ok) {
+        const timeNow = new Date().toISOString();
+        setLastCloudSyncTime(timeNow);
+        localStorage.setItem('last_cloud_sync_time', timeNow);
+        localStorage.setItem('cloud_user_id', cloudUserId);
+        window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: '클라우드 백업이 완료되었습니다!' } }));
+      } else {
+        window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: '클라우드 백업 실패 (네트워크를 확인하세요)', type: 'error' } }));
+      }
+    } catch (e) {
+      window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: '클라우드 백업 중 오류 발생', type: 'error' } }));
+    } finally {
+      setIsCloudSyncing(false);
+    }
+  };
+
+  const handleCloudDownload = async () => {
+    if (isCloudSyncing) return;
+    if (!window.confirm('클라우드에서 데이터를 불러오시겠습니까?\n현재 기기의 기록이 클라우드 백업본으로 교체됩니다.')) return;
+    
+    setIsCloudSyncing(true);
+    window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: 'Firebase 클라우드에서 불러오는 중...' } }));
+    
+    try {
+      const cloudData = await loadFromFirebase(cloudUserId);
+      if (cloudData && Array.isArray(cloudData.records)) {
+        setRecords(cloudData.records);
+        setFixedExpenses(Array.isArray(cloudData.fixedExpenses) ? cloudData.fixedExpenses : []);
+        if (cloudData.salaryRecords && Array.isArray(cloudData.salaryRecords)) {
+          (setSalaryRecords as any)(cloudData.salaryRecords);
+        }
+        if (cloudData.locations) {
+          setLocations(cloudData.locations);
+        }
+        const timeNow = cloudData.updatedAt || new Date().toISOString();
+        setLastCloudSyncTime(timeNow);
+        localStorage.setItem('last_cloud_sync_time', timeNow);
+        window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: `클라우드에서 ${cloudData.records.length}건 복원 완료!` } }));
+      } else {
+        window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: '클라우드에 저장된 백업 데이터가 없습니다.', type: 'error' } }));
+      }
+    } catch (e) {
+      window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: '클라우드 불러오기 중 오류 발생', type: 'error' } }));
+    } finally {
+      setIsCloudSyncing(false);
+    }
+  };
+
   const handleLocationSave = () => {
     if(!locName) return;
     if (editingLocName && editingLocName !== locName) {
@@ -460,18 +549,16 @@ const SettingsPage2: React.FC<any> = ({
 
         {financeTab === 'general' && (
           <div className="space-y-4">
-            {editingGenId && (
-              <div className="p-4 bg-orange-50 border border-orange-200 rounded-xl space-y-3">
-                <div className="grid grid-cols-2 gap-2">
-                  <input type="date" value={genDate} onChange={e => setGenDate(e.target.value)} className="p-2.5 border rounded-lg text-xs outline-none bg-white" />
-                  <input type="number" placeholder="금액(만원)" value={genCost} onChange={e => setGenCost(e.target.value)} className="p-2.5 border rounded-lg text-xs font-bold outline-none bg-white" />
-                </div>
-                <div className="flex gap-2">
-                  <input type="text" placeholder="내용" value={genMemo} onChange={e => setGenMemo(e.target.value)} className="flex-1 p-2.5 border rounded-lg text-xs outline-none bg-white" />
-                  <button onClick={saveGeneralEdit} className="px-4 py-2.5 bg-orange-500 text-white rounded-lg text-xs font-black shrink-0">수정 완료</button>
-                </div>
+            <div className={`p-4 rounded-xl border space-y-3 ${editingGenId ? 'bg-orange-50 border-orange-200' : 'bg-orange-50/50 border-orange-100'}`}>
+              <div className="grid grid-cols-2 gap-2">
+                <input type="date" value={genDate} onChange={e => setGenDate(e.target.value)} className="p-2.5 border rounded-lg text-xs outline-none bg-white focus:ring-2 focus:ring-orange-200" />
+                <input type="number" placeholder="금액(만원)" value={genCost} onChange={e => setGenCost(e.target.value)} className="p-2.5 border rounded-lg text-xs font-bold outline-none bg-white focus:ring-2 focus:ring-orange-200" />
               </div>
-            )}
+              <div className="flex gap-2">
+                <input type="text" placeholder="항목명 (예: 식대, 수리비)" value={genMemo} onChange={e => setGenMemo(e.target.value)} className="flex-1 p-2.5 border rounded-lg text-xs outline-none bg-white focus:ring-2 focus:ring-orange-200" />
+                <button onClick={saveGeneralEdit} className={`px-4 py-2.5 text-white rounded-lg text-xs font-black shrink-0 ${editingGenId ? 'bg-orange-500' : 'bg-orange-600'}`}>{editingGenId ? '수정 완료' : '등록'}</button>
+              </div>
+            </div>
             <div className="max-h-60 overflow-y-auto divide-y border rounded-xl bg-white shadow-inner">
               {(records || []).filter(r => r && r.type === '지출').sort((a,b) => b.id - a.id).map(r => (
                 <div key={r.id} className="p-3 flex justify-between items-center text-[11px]">
@@ -558,7 +645,60 @@ const SettingsPage2: React.FC<any> = ({
         </div>
       </Section>
 
-      <Section id="data" title="데이터 관리" icon={Database} activeSection={activeSection} setActiveSection={setActiveSection}>
+      <Section id="cloud" title="클라우드 동기화 (Firebase)" icon={Cloud} activeSection={activeSection} setActiveSection={setActiveSection}>
+        <div className="space-y-4">
+          <div className="p-4 bg-blue-50/60 border border-blue-100 rounded-2xl space-y-3">
+            <div className="flex justify-between items-center">
+              <span className="text-xs font-bold text-slate-700">기사 식별 ID (클라우드 계정)</span>
+              <span className="text-[10px] text-blue-600 bg-blue-100/70 px-2 py-0.5 rounded-full font-bold">실시간 연동</span>
+            </div>
+            <input 
+              type="text" 
+              placeholder="예: 010-1234-5678 또는 차량번호" 
+              value={cloudUserId} 
+              onChange={e => setCloudUserId(e.target.value)} 
+              className="w-full p-2.5 bg-white border border-blue-200 rounded-xl text-xs font-bold outline-none focus:ring-2 focus:ring-blue-300"
+            />
+            <p className="text-[10px] text-slate-500">
+              * 기기를 변경하더라도 위 식별 ID만 똑같이 입력하면 언제든 모든 데이터를 불러올 수 있습니다.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <button 
+              onClick={handleCloudUpload} 
+              disabled={isCloudSyncing}
+              className="p-4 bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-2xl flex flex-col items-center justify-center gap-1.5 shadow-sm active:scale-95 transition-all disabled:opacity-50"
+            >
+              {isCloudSyncing ? <RefreshCw size={22} className="animate-spin" /> : <CloudUpload size={22} />}
+              <span className="text-xs font-black">클라우드에 백업</span>
+              <span className="text-[9px] text-blue-200">현재 기기 ➡️ 클라우드</span>
+            </button>
+
+            <button 
+              onClick={handleCloudDownload} 
+              disabled={isCloudSyncing}
+              className="p-4 bg-white border border-blue-200 text-blue-700 rounded-2xl flex flex-col items-center justify-center gap-1.5 shadow-sm active:scale-95 transition-all disabled:opacity-50 hover:bg-blue-50/50"
+            >
+              {isCloudSyncing ? <RefreshCw size={22} className="animate-spin text-blue-600" /> : <CloudDownload size={22} className="text-blue-600" />}
+              <span className="text-xs font-black">클라우드서 불러오기</span>
+              <span className="text-[9px] text-slate-400">클라우드 ➡️ 현재 기기</span>
+            </button>
+          </div>
+
+          <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex justify-between items-center text-xs">
+            <span className="text-[10px] font-bold text-slate-500">마지막 클라우드 백업</span>
+            <span className="text-[11px] font-black text-blue-600">
+              {lastCloudSyncTime ? new Date(lastCloudSyncTime).toLocaleString('ko-KR', {
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit'
+              }) : '기록 없음'}
+            </span>
+          </div>
+        </div>
+      </Section>
+
+      <Section id="data" title="기기 로컬 데이터 관리" icon={Database} activeSection={activeSection} setActiveSection={setActiveSection}>
         <div className="grid grid-cols-2 gap-3">
           <button onClick={() => onManualBackup()} className="p-5 bg-blue-50 text-blue-600 rounded-2xl flex flex-col items-center gap-2 border border-blue-100 active:scale-95 transition-all shadow-sm"><Download size={24}/><span className="text-[11px] font-black uppercase">전체 백업</span></button>
           <div className="relative p-5 bg-emerald-50 text-emerald-600 rounded-2xl flex flex-col items-center gap-2 border border-emerald-100 active:scale-95 transition-all shadow-sm">
