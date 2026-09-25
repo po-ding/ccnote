@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { Clipboard } from '@capacitor/clipboard';
 import { Sparkles, Clipboard as ClipboardIcon, X, ArrowRight, Save, Copy, FileText, MapPin, Info, Loader2, Trash2 } from 'lucide-react';
 import { TransportRecord, LocationInfo } from '../types';
-import { getWorkDate, getCurrentTimeString, findPriceForRoute } from '../utils';
+import { getWorkDate, getCurrentTimeString, findPriceForRoute, findBestLocationMatch } from '../utils';
 import { GoogleGenAI, Type } from "@google/genai";
 
 interface Props {
@@ -46,26 +46,13 @@ const SMSParser: React.FC<Props> = ({ locations, setLocations, onParsed, records
 
   const getFuzzyLocation = (rawName: string): { name: string; address: string; memo: string } => {
     const trimmed = rawName.trim();
-    const result = { name: trimmed, address: '', memo: '' };
-    if (trimmed.length < 1) return result;
+    if (trimmed.length < 1) return { name: '', address: '', memo: '' };
 
-    const storedNames = Object.keys(locations);
-    const getNum = (s: string) => s.match(/\d+/)?.[0] || "";
-
-    for (const stored of storedNames) {
-      const storedNum = getNum(stored);
-      const trimmedNum = getNum(trimmed);
-      if (stored === trimmed) {
-        return { name: stored, address: locations[stored].address, memo: locations[stored].memo };
-      }
-      const hasNumber = storedNum !== "" || trimmedNum !== "";
-      const isNumMatch = hasNumber ? (storedNum === trimmedNum) : true;
-      const isStringMatch = stored.includes(trimmed) || trimmed.includes(stored);
-      if (isNumMatch && isStringMatch) {
-        return { name: stored, address: locations[stored].address, memo: locations[stored].memo };
-      }
+    const match = findBestLocationMatch(locations, trimmed);
+    if (match.address || match.memo) {
+      return match;
     }
-    return result;
+    return { name: trimmed, address: '', memo: '' };
   };
 
   const analyzeWithAI = async (smsText: string) => {

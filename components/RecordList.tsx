@@ -21,9 +21,10 @@ import {
   CornerUpLeft,
   Ban,
   Copy,
-  Navigation
+  Navigation,
+  X
 } from 'lucide-react';
-import { formatToManwon } from '../utils';
+import { formatToManwon, normalizeCenterName, findBestLocationMatch } from '../utils';
 
 interface Props {
   records: TransportRecord[];
@@ -57,6 +58,63 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
     value: '',
     onSave: () => {},
   });
+
+  const [selectedEstimateRoute, setSelectedEstimateRoute] = useState<{
+    from: string;
+    to: string;
+    stats: { min: number; max: number; expected: number; count: number } | null;
+  } | null>(null);
+
+  // 동일 구간 과거 운행시간 사전 집계 (O(1) 캐시 맵)
+  const routeTimeStatsMap = useMemo(() => {
+    if (!Array.isArray(records)) return {};
+
+    const map: Record<string, { min: number; max: number; expected: number; count: number }> = {};
+    const routeDurations: Record<string, number[]> = {};
+
+    records.forEach(r => {
+      // 1. 현재 운행 중이거나 취소된 건은 제외
+      if (r.isStarted || r.type === '운행취소' || r.type === '공차거리' || r.type === '주유기록') return;
+      if (!r.from || !r.to || !r.from.trim() || !r.to.trim()) return;
+      if (!r.time || !r.endTime) return;
+
+      const [sh, sm] = r.time.split(':').map(Number);
+      const [eh, em] = r.endTime.split(':').map(Number);
+      if (isNaN(sh) || isNaN(sm) || isNaN(eh) || isNaN(em)) return;
+
+      let diffMinutes = (eh * 60 + em) - (sh * 60 + sm);
+      if (diffMinutes < 0) diffMinutes += 1440; // 자정 넘김 대응
+
+      // 2. 비정상 이상치(5분 미만, 12시간 초과) 제외
+      if (diffMinutes < 5 || diffMinutes > 720) return;
+
+      const normFrom = normalizeCenterName(r.from);
+      const normTo = normalizeCenterName(r.to);
+      if (!normFrom || !normTo) return;
+
+      const key = `${normFrom}➜${normTo}`;
+      if (!routeDurations[key]) {
+        routeDurations[key] = [];
+      }
+      routeDurations[key].push(diffMinutes);
+    });
+
+    Object.keys(routeDurations).forEach(key => {
+      const list = routeDurations[key];
+      if (list.length === 0) return;
+      const min = Math.min(...list);
+      const max = Math.max(...list);
+      const expected = Math.round((min + max) / 2);
+      map[key] = {
+        min,
+        max,
+        expected,
+        count: list.length
+      };
+    });
+
+    return map;
+  }, [records]);
 
   const handleEditCenter = (record: TransportRecord, target: 'from' | 'to') => {
     const isFrom = target === 'from';
@@ -152,8 +210,8 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
   );
 
   const copyAddress = async (name: string) => {
-    const info = locations[name];
-    const targetAddress = (info && info.address && info.address.trim()) ? info.address.trim() : name;
+    const match = findBestLocationMatch(locations, name);
+    const targetAddress = (match && match.address && match.address.trim()) ? match.address.trim() : name;
     await Clipboard.write({ string: targetAddress });
     window.dispatchEvent(new CustomEvent('show-toast', { detail: { message: `📋 ${targetAddress}` } }));
   };
@@ -166,7 +224,9 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
 
   const getVisitCount = (centerName?: string) => {
     if (!centerName || !Array.isArray(records)) return 0;
-    return records.filter(r => r && (r.from === centerName || r.to === centerName)).length;
+    const norm = normalizeCenterName(centerName);
+    if (!norm) return 0;
+    return records.filter(r => r && (normalizeCenterName(r.from || '') === norm || normalizeCenterName(r.to || '') === norm)).length;
   };
 
   const renderCard = (record: TransportRecord, isActive: boolean = false, isWaiting: boolean = false) => {
@@ -212,6 +272,13 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
 
     const startVisitCount = getVisitCount(record.from);
     const endVisitCount = getVisitCount(record.to);
+    const normFrom = record.from ? normalizeCenterName(record.from) : '';
+    const normTo = record.to ? normalizeCenterName(record.to) : '';
+    const routeKey = (normFrom && normTo) ? `${normFrom}➜${normTo}` : '';
+    const routeStats = routeKey ? routeTimeStatsMap[routeKey] : null;
+
+    const fromMatch = record.from ? findBestLocationMatch(locations, record.from) : null;
+    const toMatch = record.to ? findBestLocationMatch(locations, record.to) : null;
 
     return (
       <div key={record.id} className={`bg-white rounded-2xl p-4 shadow-sm border ${isActive ? 'border-blue-500 ring-2 ring-blue-100 scale-[1.02]' : isCancelled ? 'border-red-200 bg-red-50/10' : isOverhead ? 'border-orange-200 bg-orange-50/10' : 'border-slate-100'} flex flex-col gap-3 transition-all relative overflow-hidden animate-in fade-in slide-in-from-bottom-2 duration-300`}>
@@ -263,6 +330,22 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
                 <span className="text-[11px] font-bold text-amber-800 bg-amber-50 border border-amber-200/80 px-2 py-0.5 rounded-md shrink-0">
                   배정 {record.scheduledTime}
                 </span>
+              )}
+
+              {/* 3. 동일 구간 과거 운행시간 기반 예상시간 */}
+              {record.type !== '공차거리' && record.type !== '주유기록' && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedEstimateRoute({
+                    from: record.from || '',
+                    to: record.to || '',
+                    stats: routeStats
+                  })}
+                  className="text-[11px] font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/80 px-2 py-0.5 rounded-md shrink-0 active:scale-95 transition-all flex items-center gap-0.5"
+                  title="동일 구간 과거 운행시간 통계 보기"
+                >
+                  <span>예상 {routeStats && routeStats.count > 0 ? `${routeStats.expected}분` : '-분'}</span>
+                </button>
               )}
             </div>
           </div>
@@ -331,8 +414,8 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
                 <div className="flex items-start gap-1.5 flex-1 min-w-0">
                   <Info size={13} className="text-blue-400 mt-0.5 shrink-0" />
                   <span className="text-xs font-semibold text-slate-700 break-all leading-snug">
-                    {record.from && locations[record.from]?.memo ? (
-                      locations[record.from].memo
+                    {fromMatch && fromMatch.memo ? (
+                      fromMatch.memo
                     ) : (
                       <span className="text-slate-400 italic text-[11px]">상차 메모 없음</span>
                     )}
@@ -385,8 +468,8 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
                 <div className="flex items-start gap-1.5 flex-1 min-w-0">
                   <Info size={13} className="text-emerald-500 mt-0.5 shrink-0" />
                   <span className="text-xs font-semibold text-slate-700 break-all leading-snug">
-                    {record.to && locations[record.to]?.memo ? (
-                      locations[record.to].memo
+                    {toMatch && toMatch.memo ? (
+                      toMatch.memo
                     ) : (
                       <span className="text-slate-400 italic text-[11px]">하차 메모 없음</span>
                     )}
@@ -560,6 +643,98 @@ const RecordList: React.FC<Props> = ({ records, locations, setLocations, setReco
                 저장
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 동일 구간 과거 운행시간 상세 모달 */}
+      {selectedEstimateRoute && (
+        <div 
+          className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4 animate-in fade-in duration-200"
+          onClick={() => setSelectedEstimateRoute(null)}
+        >
+          <div 
+            className="bg-white rounded-3xl p-5 w-full max-w-xs space-y-4 shadow-2xl border border-slate-100 relative animate-in zoom-in-95 duration-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 bg-indigo-600 rounded-xl flex items-center justify-center shadow-sm text-white">
+                  <Clock size={16} />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="font-black text-slate-800 text-sm">동일구간 과거 운행시간</h3>
+                  <p className="text-[11px] text-slate-500 font-bold truncate max-w-[170px]">
+                    {selectedEstimateRoute.from || '상차지'} ➜ {selectedEstimateRoute.to || '하차지'}
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setSelectedEstimateRoute(null)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-full active:scale-90 transition-transform"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {selectedEstimateRoute.stats && selectedEstimateRoute.stats.count > 0 ? (
+              <div className="space-y-3">
+                <div className="grid grid-cols-3 gap-2 bg-indigo-50/50 p-3 rounded-2xl border border-indigo-100">
+                  {/* 최소시간 */}
+                  <div className="flex flex-col items-center">
+                    <span className="text-[10px] font-bold text-slate-500">최소시간</span>
+                    <span className="text-base font-black text-slate-700 tracking-tight">
+                      {selectedEstimateRoute.stats.min}분
+                    </span>
+                  </div>
+
+                  {/* 예상시간 */}
+                  <div className="flex flex-col items-center border-x border-indigo-200 px-1">
+                    <span className="text-[10px] font-bold text-indigo-600">예상시간</span>
+                    <span className="text-xl font-black text-indigo-700 tracking-tight">
+                      {selectedEstimateRoute.stats.expected}분
+                    </span>
+                  </div>
+
+                  {/* 최대시간 */}
+                  <div className="flex flex-col items-center">
+                    <span className="text-[10px] font-bold text-slate-500">최대시간</span>
+                    <span className="text-base font-black text-slate-700 tracking-tight">
+                      {selectedEstimateRoute.stats.max}분
+                    </span>
+                  </div>
+                </div>
+
+                <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-100 text-[11px] text-slate-600 font-medium space-y-1">
+                  <div className="flex justify-between items-center font-bold text-indigo-900">
+                    <span>분석 데이터:</span>
+                    <span>과거 기록 {selectedEstimateRoute.stats.count}건 기준</span>
+                  </div>
+                  <div className="text-[10px] text-slate-400 leading-tight">
+                    * 최소시간과 최대시간의 중간값((최소+최대)/2)으로 산출된 예상 소요시간입니다.
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="py-6 text-center space-y-2">
+                <div className="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center mx-auto text-slate-400">
+                  <Info size={20} />
+                </div>
+                <p className="text-xs font-bold text-slate-600">
+                  동일 구간의 과거 운행 기록이 없습니다.
+                </p>
+                <p className="text-[11px] text-slate-400 leading-relaxed px-2">
+                  해당 구간의 운행을 완료하면 자동으로 소요시간이 분석되어 다음 운행에 반영됩니다.
+                </p>
+              </div>
+            )}
+
+            <button
+              onClick={() => setSelectedEstimateRoute(null)}
+              className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl active:scale-95 transition-all shadow-md"
+            >
+              닫기
+            </button>
           </div>
         </div>
       )}

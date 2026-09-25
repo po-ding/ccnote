@@ -35,7 +35,9 @@ import {
 import { 
   getWorkDate, 
   calculateDistance,
-  getCurrentTimeString
+  getCurrentTimeString,
+  smoothSpeed,
+  formatSpeedDisplay
 } from './utils';
 
 import { analyzeReceipt } from './ocr';
@@ -78,6 +80,67 @@ const App: React.FC = () => {
   const [currentGpsDistance, setCurrentGpsDistance] = useState(0);
   const [currentCargoDistance, setCurrentCargoDistance] = useState(0);
   const [isDistanceModalOpen, setIsDistanceModalOpen] = useState(false);
+  const [currentSpeed, setCurrentSpeed] = useState<number | null>(null);
+  const [currentTimeDisplay, setCurrentTimeDisplay] = useState<string>(getCurrentTimeString());
+  const [isTunnelActive, setIsTunnelActive] = useState<boolean>(false);
+  const [gpsDiagnostics, setGpsDiagnostics] = useState<{
+    accuracy: number;
+    rawSpeedKmh: number;
+    pointsReceived: number;
+    pointsAccepted: number;
+    pointsRejected: number;
+    lastIntervalSec: number;
+    tunnelActive: boolean;
+  }>({
+    accuracy: 0,
+    rawSpeedKmh: 0,
+    pointsReceived: 0,
+    pointsAccepted: 0,
+    pointsRejected: 0,
+    lastIntervalSec: 0,
+    tunnelActive: false
+  });
+  const [showGpsDiagnostics, setShowGpsDiagnostics] = useState(false);
+
+  const subDistanceBufferRef = useRef<number>(0);
+  const lastPointRef = useRef<{
+    lat: number;
+    lng: number;
+    timestamp: number;
+    speedKmh: number;
+    accuracy: number;
+  } | null>(null);
+
+  const recentCruisingSpeedsRef = useRef<number[]>([]);
+  const tunnelIntervalRef = useRef<any>(null);
+  const tunnelEntryCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
+  const tunnelEntrySpeedRef = useRef<number>(0);
+  const tunnelDistanceAccumulatedRef = useRef<number>(0);
+  const tunnelStartTimeRef = useRef<number>(0);
+  const lastGpsTickTimeRef = useRef<number>(Date.now());
+  const smoothedSpeedRef = useRef<number | null>(null);
+
+  const diagRef = useRef({
+    received: 0,
+    accepted: 0,
+    rejected: 0,
+    accuracy: 0,
+    rawSpeed: 0,
+    lastInterval: 0
+  });
+
+  // 실시간 24시간제 시계 동기화 (10초 주기 체크 & 화면 복귀 시 즉시 갱신)
+  useEffect(() => {
+    const updateTime = () => setCurrentTimeDisplay(getCurrentTimeString());
+    updateTime();
+    const timer = setInterval(updateTime, 10000);
+    window.addEventListener('focus', updateTime);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', updateTime);
+    };
+  }, []);
+
   const isCargoActiveRef = useRef(false);
 
   const formatDist = (dist: number) => {
@@ -204,6 +267,8 @@ const App: React.FC = () => {
         return updated;
       });
 
+      subDistanceBufferRef.current = 0;
+      tunnelDistanceAccumulatedRef.current = 0;
       accumulatedDistanceRef.current = 0;
       sessionCargoDistanceRef.current = 0;
       setCurrentGpsDistance(0);
@@ -279,50 +344,69 @@ const App: React.FC = () => {
           console.error('WakeLock release error:', e);
         }
       }
+
+      if (tunnelIntervalRef.current) {
+        clearInterval(tunnelIntervalRef.current);
+        tunnelIntervalRef.current = null;
+      }
+      setIsTunnelActive(false);
+
+      // 잔여 미세거리 버퍼 합산
+      if (subDistanceBufferRef.current > 0) {
+        accumulatedDistanceRef.current += subDistanceBufferRef.current;
+        if (isCargoActiveRef.current) {
+          sessionCargoDistanceRef.current += subDistanceBufferRef.current;
+        }
+        subDistanceBufferRef.current = 0;
+      }
+
       lastCoordsRef.current = null;
+      lastPointRef.current = null;
+      smoothedSpeedRef.current = null;
+      setCurrentSpeed(null);
 
       if (accumulatedDistanceRef.current > 0) {
-      const today = viewDateRef.current;
-      const nowTime = getCurrentTimeString();
-      
-      // 1. 현재 세션의 공차 거리 계산 (총 GPS 거리 - 화물 운송 거리)
-      const emptyDist = Math.max(0, accumulatedDistanceRef.current - sessionCargoDistanceRef.current);
-
-      setRecords(prev => {
-        let updated = [...prev];
+        const today = viewDateRef.current;
+        const nowTime = getCurrentTimeString();
         
-        // 2. 운행 중인 화물 자동 종료 처리
-        updated = updated.map(r => {
-          if (r.isStarted && r.type !== '공차거리') {
-            return { ...r, isStarted: false, endTime: nowTime };
+        // 1. 현재 세션의 공차 거리 계산 (총 GPS 거리 - 화물 운송 거리)
+        const emptyDist = Math.max(0, accumulatedDistanceRef.current - sessionCargoDistanceRef.current);
+
+        setRecords(prev => {
+          let updated = [...prev];
+          
+          // 2. 운행 중인 화물 자동 종료 처리
+          updated = updated.map(r => {
+            if (r.isStarted && r.type !== '공차거리') {
+              return { ...r, isStarted: false, endTime: nowTime };
+            }
+            return r;
+          });
+
+          // 3. 공차 거리 기록 추가 (0.1km 미만은 노이즈로 간주하여 무시)
+          if (emptyDist >= 0.1) {
+            const newRecord: TransportRecord = {
+              id: Date.now(),
+              date: today,
+              time: nowTime,
+              type: '공차거리',
+              from: 'GPS 공차 합산',
+              distance: emptyDist,
+              income: 0, cost: 0, liters: 0, unitPrice: 0, brand: '기타', ureaLiters: 0, ureaUnitPrice: 0, ureaStation: '', supplyItem: '', mileage: 0, waitingTime: 0, start_gps: '', end_gps: '',
+              isStarted: false,
+              memo: `총 GPS(${accumulatedDistanceRef.current.toFixed(1)}km) - 화물(${sessionCargoDistanceRef.current.toFixed(1)}km)`
+            };
+            updated.push(newRecord);
           }
-          return r;
+          
+          return updated;
         });
 
-        // 3. 공차 거리 기록 추가 (0.1km 미만은 노이즈로 간주하여 무시)
-        if (emptyDist >= 0.1) {
-          const newRecord: TransportRecord = {
-            id: Date.now(),
-            date: today,
-            time: nowTime,
-            type: '공차거리',
-            from: 'GPS 공차 합산',
-            distance: emptyDist,
-            income: 0, cost: 0, liters: 0, unitPrice: 0, brand: '기타', ureaLiters: 0, ureaUnitPrice: 0, ureaStation: '', supplyItem: '', mileage: 0, waitingTime: 0, start_gps: '', end_gps: '',
-            isStarted: false,
-            memo: `총 GPS(${accumulatedDistanceRef.current.toFixed(1)}km) - 화물(${sessionCargoDistanceRef.current.toFixed(1)}km)`
-          };
-          updated.push(newRecord);
-        }
-        
-        return updated;
-      });
-
-      accumulatedDistanceRef.current = 0;
-      sessionCargoDistanceRef.current = 0;
-      setCurrentGpsDistance(0);
-      setCurrentCargoDistance(0);
-    }
+        accumulatedDistanceRef.current = 0;
+        sessionCargoDistanceRef.current = 0;
+        setCurrentGpsDistance(0);
+        setCurrentCargoDistance(0);
+      }
 
       if (Capacitor.getPlatform() === 'android') {
         await ForegroundService.stopForegroundService();
@@ -361,11 +445,22 @@ const App: React.FC = () => {
       console.error("Permission check error:", e);
     }
 
-    sessionCargoDistanceRef.current = 0; // 세션 시작 시 초기화
+    sessionCargoDistanceRef.current = 0;
     accumulatedDistanceRef.current = 0;
+    subDistanceBufferRef.current = 0;
+    recentCruisingSpeedsRef.current = [];
+    tunnelDistanceAccumulatedRef.current = 0;
+    lastGpsTickTimeRef.current = Date.now();
+    smoothedSpeedRef.current = null;
+    diagRef.current = { received: 0, accepted: 0, rejected: 0, accuracy: 0, rawSpeed: 0, lastInterval: 0 };
+    lastPointRef.current = null;
+    lastCoordsRef.current = null;
+
     setCurrentGpsDistance(0);
     setCurrentCargoDistance(0);
-    showToast('GPS 트래킹이 시작되었습니다.');
+    setCurrentSpeed(null);
+    setIsTunnelActive(false);
+    showToast('정밀 GPS 트래킹이 시작되었습니다.');
     
     try {
       if ('wakeLock' in navigator) {
@@ -389,43 +484,157 @@ const App: React.FC = () => {
       watchIdRef.current = await Geolocation.watchPosition(
         { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
         (position) => {
-          if (!position) return;
-          // 정확도가 100m 이상 떨어지면 무시 (튀는 현상 방지)
-          if (position.coords.accuracy && position.coords.accuracy > 100) return;
-          
-          const current = { lat: position.coords.latitude, lng: position.coords.longitude };
-          
-          if (lastCoordsRef.current) {
-            const dist = calculateDistance(
-              lastCoordsRef.current.lat, lastCoordsRef.current.lng,
-              current.lat, current.lng
-            );
-            
-            if (dist >= 0.01) { // 10m 이상 이동 시 합산
-              accumulatedDistanceRef.current += dist;
-              
-              if (isCargoActiveRef.current) {
-                sessionCargoDistanceRef.current += dist;
-              }
+          if (!position || !position.coords) return;
+          const now = position.timestamp || Date.now();
+          const rawAccuracy = position.coords.accuracy || 0;
+          diagRef.current.received++;
+          diagRef.current.accuracy = rawAccuracy;
+          lastGpsTickTimeRef.current = now;
 
-              setCurrentGpsDistance(accumulatedDistanceRef.current);
-              setCurrentCargoDistance(sessionCargoDistanceRef.current);
-
-              if (isCargoActiveRef.current) {
-                setRecords(prev => {
-                  const activeCargo = prev.find(r => r.isStarted && r.type !== '공차거리');
-                  if (activeCargo) {
-                    return prev.map(r => r.id === activeCargo.id ? { ...r, distance: (r.distance || 0) + dist } : r);
-                  }
-                  return prev;
-                });
-              }
-              
-              lastCoordsRef.current = current;
-            }
-          } else {
-            lastCoordsRef.current = current;
+          // 1. 속도 추출 (m/s -> km/h 환산)
+          let rawSpeedKmh: number | null = null;
+          if (position.coords.speed !== null && position.coords.speed !== undefined && !isNaN(position.coords.speed)) {
+            rawSpeedKmh = Math.max(0, position.coords.speed * 3.6);
           }
+
+          const currentCoords = { lat: position.coords.latitude, lng: position.coords.longitude };
+
+          // 터널 모드 중 정상 신호 복귀 확인
+          if (isTunnelActive) {
+            if (rawAccuracy <= 100 || (rawSpeedKmh !== null && rawSpeedKmh > 20)) {
+              setIsTunnelActive(false);
+            }
+          }
+
+          // 첫 번째 포인트 초기화
+          if (!lastPointRef.current) {
+            lastPointRef.current = {
+              lat: currentCoords.lat,
+              lng: currentCoords.lng,
+              timestamp: now,
+              speedKmh: rawSpeedKmh ?? 0,
+              accuracy: rawAccuracy
+            };
+            lastCoordsRef.current = currentCoords;
+            diagRef.current.accepted++;
+            if (rawSpeedKmh !== null) {
+              const initSmoothed = smoothSpeed(null, rawSpeedKmh);
+              smoothedSpeedRef.current = initSmoothed;
+              setCurrentSpeed(initSmoothed);
+            }
+            return;
+          }
+
+          // 시간차 (dt) 계산 (최소 0.1초)
+          const dtSec = Math.max(0.1, (now - lastPointRef.current.timestamp) / 1000);
+          diagRef.current.lastInterval = dtSec;
+
+          // 측지선 거리 (km)
+          const stepDist = calculateDistance(
+            lastPointRef.current.lat, lastPointRef.current.lng,
+            currentCoords.lat, currentCoords.lng
+          );
+
+          // 이동거리/시간차로 계산된 속도 (km/h)
+          const calcSpeedKmh = (stepDist / dtSec) * 3600;
+
+          // 유효 속도 판정
+          const effectiveSpeedKmh = rawSpeedKmh !== null ? rawSpeedKmh : calcSpeedKmh;
+          diagRef.current.rawSpeed = effectiveSpeedKmh;
+
+          // 비정상적인 GPS 순간 튐(Teleport) 필터링:
+          // 화물차가 물리적으로 낼 수 없는 극단적 속도(140km/h 초과)이면서 50m 이상 급격한 이동일 때 제외
+          if (calcSpeedKmh > 140 && stepDist > 0.05) {
+            diagRef.current.rejected++;
+            return;
+          }
+
+          // 정확도가 150m 이상으로 매우 낮으면서 속도 오차가 극단적일 때만 필터링
+          if (rawAccuracy > 150 && calcSpeedKmh > 90 && (rawSpeedKmh !== null && Math.abs(calcSpeedKmh - rawSpeedKmh) > 60)) {
+            diagRef.current.rejected++;
+            return;
+          }
+
+          // 정차 중 (속도 1.2km/h 미만 & 계산속도 2km/h 미만) 미세 떨림(Jitter) 차단
+          const isStationary = effectiveSpeedKmh < 1.2 && calcSpeedKmh < 2.0;
+
+          if (isStationary) {
+            setCurrentSpeed(0);
+            smoothedSpeedRef.current = 0;
+            // 기준점은 최신 상태로 유지하되 거리는 증가시키지 않음
+            lastPointRef.current = {
+              lat: currentCoords.lat,
+              lng: currentCoords.lng,
+              timestamp: now,
+              speedKmh: 0,
+              accuracy: rawAccuracy
+            };
+            lastCoordsRef.current = currentCoords;
+            diagRef.current.accepted++;
+            return;
+          }
+
+          // 정상 주행 중인 경우:
+          // 10m 미만 이동도 버리지 않고 버퍼에 누적!
+          subDistanceBufferRef.current += stepDist;
+
+          // 2m(0.002km) 이상 누적되거나 시속 5km 이상 주행 시 즉시 합산
+          if (subDistanceBufferRef.current >= 0.002 || effectiveSpeedKmh >= 5.0) {
+            const addDist = subDistanceBufferRef.current;
+            subDistanceBufferRef.current = 0;
+
+            accumulatedDistanceRef.current += addDist;
+            if (isCargoActiveRef.current) {
+              sessionCargoDistanceRef.current += addDist;
+            }
+
+            setCurrentGpsDistance(accumulatedDistanceRef.current);
+            setCurrentCargoDistance(sessionCargoDistanceRef.current);
+
+            if (isCargoActiveRef.current) {
+              setRecords(prev => {
+                const activeCargo = prev.find(r => r.isStarted && r.type !== '공차거리');
+                if (activeCargo) {
+                  return prev.map(r => r.id === activeCargo.id ? { ...r, distance: (r.distance || 0) + addDist } : r);
+                }
+                return prev;
+              });
+            }
+          }
+
+          // 화면 표시용 속도 스무딩(EMA)
+          const smoothed = smoothSpeed(smoothedSpeedRef.current, effectiveSpeedKmh);
+          smoothedSpeedRef.current = smoothed;
+          setCurrentSpeed(smoothed);
+
+          // 최근 순항 속도 보관 (터널 진입 판정용, 최대 5개 유지)
+          if (effectiveSpeedKmh >= 25) {
+            recentCruisingSpeedsRef.current.push(effectiveSpeedKmh);
+            if (recentCruisingSpeedsRef.current.length > 5) {
+              recentCruisingSpeedsRef.current.shift();
+            }
+          }
+
+          lastPointRef.current = {
+            lat: currentCoords.lat,
+            lng: currentCoords.lng,
+            timestamp: now,
+            speedKmh: effectiveSpeedKmh,
+            accuracy: rawAccuracy
+          };
+          lastCoordsRef.current = currentCoords;
+          diagRef.current.accepted++;
+
+          // 디버깅 정보 상태 업데이트
+          setGpsDiagnostics({
+            accuracy: Math.round(rawAccuracy),
+            rawSpeedKmh: Math.round(effectiveSpeedKmh),
+            pointsReceived: diagRef.current.received,
+            pointsAccepted: diagRef.current.accepted,
+            pointsRejected: diagRef.current.rejected,
+            lastIntervalSec: Number(dtSec.toFixed(1)),
+            tunnelActive: isTunnelActive
+          });
         }
       );
     } catch (err) { 
@@ -433,7 +642,75 @@ const App: React.FC = () => {
       showToast('GPS 권한을 확인해주세요.', 'error');
       setIsTracking(false);
     }
-  }, []);
+  }, [isTunnelActive]);
+
+  // 터널 / 음영구역 추측항법(Dead Reckoning) 워치독 타이머 (1초 주기)
+  useEffect(() => {
+    if (!isTracking) {
+      if (tunnelIntervalRef.current) {
+        clearInterval(tunnelIntervalRef.current);
+        tunnelIntervalRef.current = null;
+      }
+      setIsTunnelActive(false);
+      return;
+    }
+
+    const watchdog = setInterval(() => {
+      const now = Date.now();
+      const timeSinceLastGps = (now - lastGpsTickTimeRef.current) / 1000;
+      
+      const avgRecentSpeed = recentCruisingSpeedsRef.current.length > 0
+        ? recentCruisingSpeedsRef.current.reduce((a, b) => a + b, 0) / recentCruisingSpeedsRef.current.length
+        : 0;
+
+      // 터널 진입 감지: 직전 순항 속도 30km/h 이상인데 3.5초 이상 GPS 신호 단절
+      if (!isTunnelActive && avgRecentSpeed >= 30 && timeSinceLastGps >= 3.5) {
+        setIsTunnelActive(true);
+        tunnelEntrySpeedRef.current = Math.min(avgRecentSpeed, 100);
+        tunnelStartTimeRef.current = now;
+        tunnelDistanceAccumulatedRef.current = 0;
+        if (lastPointRef.current) {
+          tunnelEntryCoordsRef.current = { lat: lastPointRef.current.lat, lng: lastPointRef.current.lng };
+        }
+      }
+
+      // 터널 추측항법 주행 중 거리 합산
+      if (isTunnelActive) {
+        const tunnelDurationSec = (now - tunnelStartTimeRef.current) / 1000;
+        // 최대 10분(600초) 안전 한도
+        if (tunnelDurationSec <= 600) {
+          const deltaKm = tunnelEntrySpeedRef.current / 3600;
+          tunnelDistanceAccumulatedRef.current += deltaKm;
+          accumulatedDistanceRef.current += deltaKm;
+          if (isCargoActiveRef.current) {
+            sessionCargoDistanceRef.current += deltaKm;
+          }
+
+          setCurrentGpsDistance(accumulatedDistanceRef.current);
+          setCurrentCargoDistance(sessionCargoDistanceRef.current);
+          setCurrentSpeed(tunnelEntrySpeedRef.current);
+
+          if (isCargoActiveRef.current) {
+            setRecords(prev => {
+              const activeCargo = prev.find(r => r.isStarted && r.type !== '공차거리');
+              if (activeCargo) {
+                return prev.map(r => r.id === activeCargo.id ? { ...r, distance: (r.distance || 0) + deltaKm } : r);
+              }
+              return prev;
+            });
+          }
+        } else {
+          setIsTunnelActive(false);
+        }
+      }
+    }, 1000);
+
+    tunnelIntervalRef.current = watchdog;
+    return () => {
+      clearInterval(watchdog);
+      tunnelIntervalRef.current = null;
+    };
+  }, [isTracking, isTunnelActive]);
 
   useEffect(() => {
     if (isTracking) startGpsTracking();
@@ -668,16 +945,32 @@ const App: React.FC = () => {
           </button>
         </div>
 
-        {/* 상단 가운데: 이동거리 숫자 표기 */}
+        {/* 상단 가운데: 이동거리 + 현재속도 + 현재시간 통합 표기 */}
         <button 
           onClick={() => setIsDistanceModalOpen(true)}
-          className="flex items-baseline justify-center cursor-pointer px-2 py-0.5 rounded-xl hover:bg-slate-50 active:scale-95 transition-all"
-          title="상세 이동거리 보기"
+          className="flex flex-col items-center justify-center cursor-pointer px-2 py-0.5 rounded-xl hover:bg-slate-50 active:scale-95 transition-all"
+          title="상세 이동거리 및 실시간 주행 상태"
         >
-          <span className="text-2xl font-black text-blue-600 tracking-tight leading-none">
-            {formatDist(currentGpsDistance)}
-          </span>
-          <span className="text-sm font-bold text-slate-500 leading-none ml-1">km</span>
+          <div className="flex items-baseline leading-none">
+            <span className="text-2xl font-black text-blue-600 tracking-tight leading-none">
+              {formatDist(currentGpsDistance)}
+            </span>
+            <span className="text-xs font-bold text-slate-500 leading-none ml-1">km</span>
+            {isTunnelActive && (
+              <span className="ml-1.5 px-1.5 py-0.5 text-[9px] font-black bg-amber-500 text-white rounded-md animate-pulse leading-none">
+                터널
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 text-[11px] font-bold text-slate-500 mt-1 leading-none">
+            <span className={`tracking-tight ${currentSpeed !== null && currentSpeed > 0 ? 'text-emerald-600 font-extrabold' : 'text-slate-500'}`}>
+              {formatSpeedDisplay(currentSpeed)}
+            </span>
+            <span className="text-slate-300">·</span>
+            <span className="text-slate-600 font-bold">
+              {currentTimeDisplay}
+            </span>
+          </div>
         </button>
 
         <div className="flex items-center gap-1.5 shrink-0">
@@ -859,6 +1152,75 @@ const App: React.FC = () => {
                 </span>
                 <span className="text-[10px] font-bold text-slate-400">km</span>
               </div>
+            </div>
+
+            {/* 실시간 속도 & 현재 시각 */}
+            <div className="bg-slate-50 p-2.5 rounded-2xl border border-slate-100 flex items-center justify-between text-xs px-3">
+              <div className="flex items-center gap-1.5 font-bold text-slate-700">
+                <span className="text-slate-400">현재 속도:</span>
+                <span className={currentSpeed !== null && currentSpeed > 0 ? 'text-emerald-600 font-extrabold' : 'text-slate-600'}>
+                  {formatSpeedDisplay(currentSpeed)}
+                </span>
+              </div>
+              <div className="flex items-center gap-1 font-bold text-slate-700">
+                <span className="text-slate-400">현재 시각:</span>
+                <span>{currentTimeDisplay}</span>
+              </div>
+            </div>
+
+            {/* 터널 상태 안내 (터널 추측항법 가동 시 표시) */}
+            {isTunnelActive && (
+              <div className="p-2.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-700 text-xs font-bold flex items-center gap-2">
+                <span className="animate-pulse text-base">🚇</span>
+                <span>터널(음영구역) 통과 중 - 속도·시간 추측항법 자동 계산 중</span>
+              </div>
+            )}
+
+            {/* GPS 정밀 디버깅/진단 패널 */}
+            <div className="border-t border-slate-100 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowGpsDiagnostics(prev => !prev)}
+                className="w-full flex items-center justify-between text-[11px] font-bold text-slate-500 py-1 hover:text-slate-700 transition-colors"
+              >
+                <span>GPS 정밀 진단 모니터</span>
+                <span className="text-blue-600">{showGpsDiagnostics ? '▲ 접기' : '▼ 진단 보기'}</span>
+              </button>
+
+              {showGpsDiagnostics && (
+                <div className="mt-2 p-2.5 bg-slate-900 text-slate-200 rounded-xl text-[10px] font-mono space-y-1.5 border border-slate-800">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">GPS 오차반경(Accuracy):</span>
+                    <span className="font-bold text-emerald-400">±{gpsDiagnostics.accuracy}m</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">센서 속도(Raw Speed):</span>
+                    <span>{gpsDiagnostics.rawSpeedKmh} km/h</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">수신 간격(dt):</span>
+                    <span>{gpsDiagnostics.lastIntervalSec}초</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">수신 포인트 총합:</span>
+                    <span>{gpsDiagnostics.pointsReceived}개</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">채택 / 튐 필터링:</span>
+                    <span>
+                      <strong className="text-emerald-400">{gpsDiagnostics.pointsAccepted}</strong>
+                      <span className="text-slate-500 mx-1">/</span>
+                      <strong className="text-rose-400">{gpsDiagnostics.pointsRejected}</strong>
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">터널 추측항법:</span>
+                    <span className={isTunnelActive ? 'text-amber-400 font-bold' : 'text-slate-400'}>
+                      {isTunnelActive ? '작동 중 (Active)' : '정상 수신 중 (Normal)'}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="text-[11px] text-slate-400 text-center font-medium">

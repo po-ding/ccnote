@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { TransportRecord, RecordType, LocationInfo } from '../types';
-import { getWorkDate, getCurrentTimeString, findPriceForRoute } from '../utils';
+import { getWorkDate, getCurrentTimeString, findPriceForRoute, findBestLocationMatch } from '../utils';
 import { Truck, Fuel, DollarSign, TrendingUp, Sparkles, Loader2, Camera, AlertCircle, Navigation, Trash2 } from 'lucide-react';
 import { analyzeReceipt } from '../ocr';
 
@@ -34,23 +34,8 @@ const RecordForm: React.FC<Props> = ({ initialData, locations, records, onSubmit
   const findLocationMemo = (name: string) => {
     const trimmed = name.trim();
     if (!trimmed) return null;
-    
-    // Exact match
-    if (locations[trimmed]) return locations[trimmed].memo;
-    
-    // Fuzzy match
-    const getNum = (s: string) => s.match(/\d+/)?.[0] || "";
-    const trimmedNum = getNum(trimmed);
-    
-    const storedNames = Object.keys(locations);
-    for (const storedName of storedNames) {
-      const info = locations[storedName];
-      const storedNum = getNum(storedName);
-      const isNumMatch = (storedNum !== "" || trimmedNum !== "") ? (storedNum === trimmedNum) : true;
-      const isStringMatch = storedName.includes(trimmed) || trimmed.includes(storedName);
-      if (isNumMatch && isStringMatch) return info.memo;
-    }
-    return null;
+    const match = findBestLocationMatch(locations, trimmed);
+    return (match && match.memo) ? match.memo : null;
   };
 
   const handleFromChange = (val: string) => {
